@@ -254,19 +254,21 @@ else
 fi
 
 L4=""
-if [ -n "$AUTH_JSON" ]; then
+# API key mode: prefer ANTHROPIC_BASE_URL env var (most reliable)
+if [ -n "$ANTHROPIC_BASE_URL" ]; then
+  L4="${DIM}api key${RESET}${SEP}${CYAN}${ANTHROPIC_BASE_URL}${RESET}"
+elif [ -n "$AUTH_JSON" ]; then
   AUTH_EMAIL=$(echo "$AUTH_JSON" | jq -r '.email // empty')
   AUTH_METHOD=$(echo "$AUTH_JSON" | jq -r '.authMethod // empty')
   AUTH_SUB=$(echo "$AUTH_JSON" | jq -r '.subscriptionType // empty')
-  AUTH_PROVIDER=$(echo "$AUTH_JSON" | jq -r '.apiProvider // empty')
+  AUTH_BASE_URL=$(echo "$AUTH_JSON" | jq -r '.baseUrl // .apiUrl // empty')
 
-  if [ -n "$AUTH_EMAIL" ]; then
+  if [ -n "$AUTH_BASE_URL" ] && [ "$AUTH_BASE_URL" != "https://api.anthropic.com" ]; then
+    L4="${DIM}api key${RESET}${SEP}${CYAN}${AUTH_BASE_URL}${RESET}"
+  elif [ -n "$AUTH_EMAIL" ]; then
     L4="${CYAN}${AUTH_EMAIL}${RESET}"
     [ -n "$AUTH_SUB" ] && L4="${L4}${SEP}${GREEN}${AUTH_SUB}${RESET}"
     [ -n "$AUTH_METHOD" ] && L4="${L4}${SEP}${DIM}${AUTH_METHOD}${RESET}"
-  elif [ "$AUTH_PROVIDER" = "apiKey" ] || [ "$AUTH_METHOD" = "apiKey" ]; then
-    API_URL=$(echo "$AUTH_JSON" | jq -r '.apiUrl // "https://api.anthropic.com"')
-    L4="${DIM}api key${RESET}${SEP}${CYAN}${API_URL}${RESET}"
   fi
 fi
 
