@@ -138,10 +138,19 @@ if [ -n "$CTX_SIZE" ] && [ "$CTX_SIZE" != "null" ]; then
   [ "$CTX_SIZE" -ge 1000000 ] && CTX_LABEL="${DIM}1M${RESET}" || CTX_LABEL="${DIM}200K${RESET}"
 fi
 
+# ── Wall-clock session duration ───────────────────────────────
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-default}"
+SESSION_START_FILE="/tmp/.claude-session-${SESSION_ID}"
+if [ ! -f "$SESSION_START_FILE" ]; then
+  date +%s > "$SESSION_START_FILE"
+fi
+SESSION_START=$(cat "$SESSION_START_FILE")
+ELAPSED_S=$(( $(date +%s) - SESSION_START ))
+
 # ══════════════════════════════════════════════════════════════
 # LINE 1: Model + version + repo + git + duration + lines + agent + vim
 # ══════════════════════════════════════════════════════════════
-DUR=$(fmt_dur "$DURATION_MS")
+DUR=$(fmt_dur "$(( ELAPSED_S * 1000 ))")
 
 L1="${CYAN}${BOLD}${MODEL}${RESET}"
 [ -n "$CTX_LABEL" ] && L1="${L1} ${CTX_LABEL}"
