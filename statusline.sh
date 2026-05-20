@@ -242,7 +242,36 @@ CR_FMT=$(fmt_tok "$CACHE_READ")
 CW_FMT=$(fmt_tok "$CACHE_CREATE")
 L3="${L3}${SEP}${DIM}cur${RESET} ${CUR_FMT} ${DIM}in${RESET}  ${CR_FMT} ${DIM}read${RESET}  ${CW_FMT} ${DIM}write${RESET}"
 
+# ══════════════════════════════════════════════════════════════
+# LINE 4: Auth info (cached 5 min)
+# ══════════════════════════════════════════════════════════════
+AUTH_CACHE="/tmp/.claude-auth-cache"
+AUTH_JSON=""
+if [ -f "$AUTH_CACHE" ] && [ $(( $(date +%s) - $(stat -f %m "$AUTH_CACHE" 2>/dev/null || echo 0) )) -lt 300 ]; then
+  AUTH_JSON=$(cat "$AUTH_CACHE")
+else
+  AUTH_JSON=$(claude auth status 2>/dev/null) && echo "$AUTH_JSON" > "$AUTH_CACHE"
+fi
+
+L4=""
+if [ -n "$AUTH_JSON" ]; then
+  AUTH_EMAIL=$(echo "$AUTH_JSON" | jq -r '.email // empty')
+  AUTH_METHOD=$(echo "$AUTH_JSON" | jq -r '.authMethod // empty')
+  AUTH_SUB=$(echo "$AUTH_JSON" | jq -r '.subscriptionType // empty')
+  AUTH_PROVIDER=$(echo "$AUTH_JSON" | jq -r '.apiProvider // empty')
+
+  if [ -n "$AUTH_EMAIL" ]; then
+    L4="${CYAN}${AUTH_EMAIL}${RESET}"
+    [ -n "$AUTH_SUB" ] && L4="${L4}${SEP}${GREEN}${AUTH_SUB}${RESET}"
+    [ -n "$AUTH_METHOD" ] && L4="${L4}${SEP}${DIM}${AUTH_METHOD}${RESET}"
+  elif [ "$AUTH_PROVIDER" = "apiKey" ] || [ "$AUTH_METHOD" = "apiKey" ]; then
+    API_URL=$(echo "$AUTH_JSON" | jq -r '.apiUrl // "https://api.anthropic.com"')
+    L4="${DIM}api key${RESET}${SEP}${CYAN}${API_URL}${RESET}"
+  fi
+fi
+
 # ── Output ────────────────────────────────────────────────────
 echo -e "$L1"
 echo -e "$L2"
 echo -e "$L3"
+[ -n "$L4" ] && echo -e "$L4"
