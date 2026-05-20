@@ -30,7 +30,7 @@ if ! jq empty "$SETTINGS" 2>/dev/null; then
 fi
 
 UPDATED=$(jq --arg cmd "bash $TARGET" \
-  '.statusLine = {"type": "command", "command": $cmd}' \
+  '.statusLine = {"type": "command", "command": $cmd, "refreshInterval": 10}' \
   "$SETTINGS")
 
 echo "$UPDATED" > "$SETTINGS"

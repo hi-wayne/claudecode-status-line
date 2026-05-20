@@ -1,5 +1,5 @@
 #!/bin/bash
-# Unified statusline: statusline.sh layout + claude-hud bar/usage style
+# Unified statusline: model + git + cost + context + tools + agent + todo + sys + config + perf
 input=$(cat)
 
 # ── Parse JSON ────────────────────────────────────────────────
@@ -25,21 +25,22 @@ RATE_5H=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty
 RATE_7D=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 RESET_5H=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 RESET_7D=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+TRANSCRIPT_PATH=$(echo "$input" | jq -r '.transcript_path // empty')
+SESSION_ID_JSON=$(echo "$input" | jq -r '.session_id // empty')
 
 # ── Colors ────────────────────────────────────────────────────
 RESET='\033[0m'; BOLD='\033[1m'; DIM='\033[2m'
 CYAN='\033[36m'; GREEN='\033[32m'; YELLOW='\033[33m'
 RED='\033[31m'; MAGENTA='\033[35m'; BLUE='\033[34m'
 WHITE='\033[37m'
-BRIGHT_BLUE='\033[94m'     # claude-hud quota color (normal)
-BRIGHT_MAGENTA='\033[95m'  # claude-hud quota color (warning)
-ORANGE='\033[38;5;208m'    # claude-hud label color
+BRIGHT_BLUE='\033[94m'
+BRIGHT_MAGENTA='\033[95m'
+ORANGE='\033[38;5;208m'
 
 SEP="${DIM} | ${RESET}"
-VSEP="${DIM} │ ${RESET}"   # vertical separator (between context and usage)
+VSEP="${DIM} │ ${RESET}"
 
-# ── Helper: context bar color (claude-hud thresholds) ─────────
-# green < 70%, yellow 70-84%, red >= 85%
+# ── Helper: context bar color ─────────────────────────────────
 ctx_color() {
   local val=${1:-0}
   if [ "$val" -ge 85 ]; then echo "$RED"
@@ -47,8 +48,7 @@ ctx_color() {
   else echo "$GREEN"; fi
 }
 
-# ── Helper: quota bar color (claude-hud thresholds) ───────────
-# brightBlue < 75%, brightMagenta 75-89%, red >= 90%
+# ── Helper: quota bar color ───────────────────────────────────
 quota_color() {
   local val=${1:-0}
   if [ "$val" -ge 90 ]; then echo "$RED"
@@ -56,20 +56,18 @@ quota_color() {
   else echo "$BRIGHT_BLUE"; fi
 }
 
-# ── Helper: render bar with █ / ░ (claude-hud style) ──────────
-# $1=pct $2=width $3=color
+# ── Helper: render bar ────────────────────────────────────────
 render_bar() {
   local pct=$1 width=$2 color=$3
   local filled=$(( pct * width / 100 ))
   local empty=$(( width - filled ))
-  local bar=""
-  local i
+  local bar="" i
   for i in $(seq 1 $filled); do bar="${bar}${color}█${RESET}"; done
   for i in $(seq 1 $empty);  do bar="${bar}${DIM}░${RESET}"; done
   echo "$bar"
 }
 
-# ── Helper: format duration from ms ───────────────────────────
+# ── Helper: format duration from ms ──────────────────────────
 fmt_dur() {
   local ms=$1
   local s=$(( ms / 1000 ))
@@ -79,7 +77,7 @@ fmt_dur() {
   else printf "%ds" "$sec"; fi
 }
 
-# ── Helper: countdown from epoch seconds ──────────────────────
+# ── Helper: countdown from epoch seconds ─────────────────────
 fmt_reset() {
   local epoch=$1
   [ -z "$epoch" ] || [ "$epoch" = "null" ] && return
@@ -139,7 +137,7 @@ if [ -n "$CTX_SIZE" ] && [ "$CTX_SIZE" != "null" ]; then
 fi
 
 # ── Wall-clock session duration ───────────────────────────────
-SESSION_ID="${CLAUDE_CODE_SESSION_ID:-default}"
+SESSION_ID="${CLAUDE_CODE_SESSION_ID:-${SESSION_ID_JSON:-default}}"
 SESSION_START_FILE="/tmp/.claude-session-${SESSION_ID}"
 if [ ! -f "$SESSION_START_FILE" ]; then
   date +%s > "$SESSION_START_FILE"
@@ -147,24 +145,112 @@ fi
 SESSION_START=$(cat "$SESSION_START_FILE")
 ELAPSED_S=$(( $(date +%s) - SESSION_START ))
 
-# ══════════════════════════════════════════════════════════════
-# LINE 1: Model + version + repo + git + duration + lines + agent + vim
-# ══════════════════════════════════════════════════════════════
-DUR=$(fmt_dur "$(( ELAPSED_S * 1000 ))")
+# ── Auth info (cached 5 min) ──────────────────────────────────
+AUTH_CACHE="/tmp/.claude-auth-cache"
+AUTH_JSON=""
+if [ -f "$AUTH_CACHE" ] && [ $(( $(date +%s) - $(stat -f %m "$AUTH_CACHE" 2>/dev/null || echo 0) )) -lt 300 ]; then
+  AUTH_JSON=$(cat "$AUTH_CACHE")
+else
+  AUTH_JSON=$(claude auth status 2>/dev/null) && echo "$AUTH_JSON" > "$AUTH_CACHE"
+fi
+AUTH_EMAIL=$(echo "$AUTH_JSON" | jq -r '.email // empty')
+AUTH_METHOD=$(echo "$AUTH_JSON" | jq -r '.authMethod // empty')
+AUTH_SUB=$(echo "$AUTH_JSON" | jq -r '.subscriptionType // empty')
+AUTH_BASE_URL=$(echo "$AUTH_JSON" | jq -r '.baseUrl // .apiUrl // empty')
 
-L1="${CYAN}${BOLD}${MODEL}${RESET}"
-[ -n "$CTX_LABEL" ] && L1="${L1} ${CTX_LABEL}"
-[ -n "$VERSION" ]   && L1="${L1} ${DIM}v${VERSION}${RESET}"
+# ── Transcript parsing (tool activity + agent, cached on mtime) ──
+TOOL_ACTIVITY=""
+AGENT_LAST=""
 
-# Repo + git (claude-hud style: project git:(branch*))
+if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+  TC="/tmp/.claude-trans-${SESSION_ID}"
+  TRANS_MTIME=$(stat -f %m "$TRANSCRIPT_PATH" 2>/dev/null || echo 0)
+  CACHE_MTIME=$(cat "${TC}.mtime" 2>/dev/null || echo -1)
+
+  if [ "$TRANS_MTIME" != "$CACHE_MTIME" ]; then
+    TOOLS_RAW=$(tail -150 "$TRANSCRIPT_PATH" | \
+      jq -r 'try (select(.type=="assistant") | .message.content[]? | select(.type=="tool_use") | .name)' 2>/dev/null)
+
+    TOOL_PARTS=()
+    while read -r count name; do
+      [ -n "$name" ] && TOOL_PARTS+=("${name}×${count}")
+    done < <(printf '%s\n' "$TOOLS_RAW" | grep -v '^$' | sort | uniq -c | sort -rn | head -7)
+    TOOL_ACTIVITY=$(IFS=" | "; echo "${TOOL_PARTS[*]}")
+
+    AGENT_LAST=$(tail -150 "$TRANSCRIPT_PATH" | \
+      jq -r 'try (select(.type=="assistant") | .message.content[]? | select(.type=="tool_use" and .name=="Agent") | "\(.input.subagent_type // "agent"): \(.input.description // "")")' 2>/dev/null | \
+      tail -1 | cut -c1-70)
+
+    printf '%s\n' "$TOOL_ACTIVITY" > "${TC}.tools"
+    printf '%s\n' "$AGENT_LAST"    > "${TC}.agent"
+    printf '%s\n' "$TRANS_MTIME"  > "${TC}.mtime"
+  else
+    TOOL_ACTIVITY=$(cat "${TC}.tools" 2>/dev/null)
+    AGENT_LAST=$(cat "${TC}.agent" 2>/dev/null)
+  fi
+fi
+
+# ── Todo (current session) ────────────────────────────────────
+TODO_FILE="$HOME/.claude/todos/${SESSION_ID}-agent-${SESSION_ID}.json"
+TODO_INFO=""
+if [ -f "$TODO_FILE" ]; then
+  TODO_TOTAL=$(jq 'length' "$TODO_FILE" 2>/dev/null || echo 0)
+  TODO_DONE=$(jq '[.[] | select(.status=="completed")] | length' "$TODO_FILE" 2>/dev/null || echo 0)
+  if [ "${TODO_TOTAL:-0}" -gt 0 ]; then
+    TODO_NEXT=$(jq -r 'map(select(.status!="completed")) | first | .activeForm // .content // empty' "$TODO_FILE" 2>/dev/null)
+    TODO_INFO="${TODO_DONE}/${TODO_TOTAL}"
+    [ -n "$TODO_NEXT" ] && TODO_INFO="${TODO_INFO} ▸ $(echo "$TODO_NEXT" | cut -c1-40)"
+  fi
+fi
+
+# ── System memory (macOS) ─────────────────────────────────────
+MEM_USED_GB=$(vm_stat | awk '
+  /page size of ([0-9]+)/        { ps = $8+0 }
+  /^Pages active:/               { a = $3+0 }
+  /^Pages wired down:/           { w = $4+0 }
+  /^Pages occupied by compressor:/ { c = $5+0 }
+  END { printf "%.1f", (a+w+c)*ps/1073741824 }
+')
+MEM_TOTAL_GB=$(echo "scale=0; $(sysctl -n hw.memsize) / 1073741824" | bc)
+
+# ── Config counts ─────────────────────────────────────────────
+CLAUDE_MD_COUNT=$(find "${DIR:-.}" -maxdepth 3 -name "CLAUDE.md" 2>/dev/null | wc -l | tr -d ' ')
+MCP_COUNT=$(jq '(.mcpServers // {}) | keys | length' "$HOME/.claude/settings.json" 2>/dev/null || echo 0)
+HOOKS_COUNT=$(jq '(.hooks // {}) | keys | length' "$HOME/.claude/settings.json" 2>/dev/null || echo 0)
+
+# ── Performance: tokens/s ─────────────────────────────────────
+TOK_PER_S=""
+if [ "${ELAPSED_S:-0}" -gt 5 ] && [ -n "$TOTAL_OUT" ] && [ "$TOTAL_OUT" != "null" ] && [ "$TOTAL_OUT" != "0" ]; then
+  TOK_PER_S=$(echo "scale=0; $TOTAL_OUT / $ELAPSED_S" | bc 2>/dev/null)
+fi
+
+# ══════════════════════════════════════════════════════════════
+# LINE 1: Auth + Model + Dir + Git + Lines diff + Vim
+# ══════════════════════════════════════════════════════════════
+L1=""
+
+# Auth
+if [ -n "$ANTHROPIC_BASE_URL" ]; then
+  L1="${DIM}api key${RESET}${SEP}${CYAN}${ANTHROPIC_BASE_URL}${RESET}"
+elif [ -n "$AUTH_BASE_URL" ]; then
+  L1="${DIM}api key${RESET}${SEP}${CYAN}${AUTH_BASE_URL}${RESET}"
+elif [ -n "$AUTH_EMAIL" ]; then
+  L1="${DIM}claude.ai${RESET}${SEP}${CYAN}${AUTH_EMAIL}${RESET}"
+  [ -n "$AUTH_SUB" ] && L1="${L1}${SEP}${GREEN}${AUTH_SUB}${RESET}"
+fi
+
+# Model + context size + version
+MODEL_PART="${CYAN}${BOLD}${MODEL}${RESET}"
+[ -n "$CTX_LABEL" ] && MODEL_PART="${MODEL_PART} ${CTX_LABEL}"
+[ -n "$VERSION" ]   && MODEL_PART="${MODEL_PART} ${DIM}v${VERSION}${RESET}"
+[ -n "$L1" ] && L1="${L1}${SEP}${MODEL_PART}" || L1="$MODEL_PART"
+
+# Dir + Git
 if [ -n "$BRANCH" ]; then
   L1="${L1}${SEP}${YELLOW}${REPO_LINK}${RESET} ${MAGENTA}git:(${RESET}${CYAN}${BRANCH}${BRIGHT_MAGENTA}${GIT_DIRTY}${RESET}${MAGENTA})${RESET}"
 else
   L1="${L1}${SEP}${YELLOW}${REPO_LINK}${RESET}"
 fi
-
-# Duration
-L1="${L1}${SEP}${DIM}⏱ ${DUR}${RESET}"
 
 # Lines added/removed
 if [ -n "$LINES_ADD" ] && [ "$LINES_ADD" != "0" ] && [ "$LINES_ADD" != "null" ]; then
@@ -176,7 +262,7 @@ elif [ -n "$LINES_DEL" ] && [ "$LINES_DEL" != "0" ] && [ "$LINES_DEL" != "null" 
   L1="${L1}${SEP}${RED}-${LINES_DEL}${RESET}"
 fi
 
-[ -n "$AGENT" ] && L1="${L1}${SEP}${MAGENTA}${AGENT}${RESET}"
+# Vim mode
 [ -n "$VIM_MODE" ] && {
   [ "$VIM_MODE" = "NORMAL" ] \
     && L1="${L1}${SEP}${BLUE}${BOLD}NOR${RESET}" \
@@ -184,16 +270,28 @@ fi
 }
 
 # ══════════════════════════════════════════════════════════════
-# LINE 2: context bar │ usage quota bar(s)  — claude-hud style
+# LINE 2: Cost + Cache + Context bar + Usage quota
 # ══════════════════════════════════════════════════════════════
 BAR_W=10
+COST_FMT=$(printf '$%.4f' "$COST")
+L2="${YELLOW}${COST_FMT}${RESET}"
+
+# Cache hit %
+if [ "$CUR_INPUT" != "0" ] && [ "$CUR_INPUT" != "null" ]; then
+  CACHE_TOTAL=$(( CACHE_READ + CUR_INPUT + CACHE_CREATE ))
+  if [ "$CACHE_TOTAL" -gt 0 ]; then
+    CACHE_PCT=$(( CACHE_READ * 100 / CACHE_TOTAL ))
+    CACHE_C=$(quota_color "$(( 100 - CACHE_PCT ))")
+    L2="${L2}${SEP}${DIM}cache${RESET} ${CACHE_C}${CACHE_PCT}%${RESET}"
+  fi
+fi
 
 # Context bar
 CTX_C=$(ctx_color "$PCT")
 CTX_BAR=$(render_bar "$PCT" "$BAR_W" "$CTX_C")
-L2="${DIM}context${RESET} ${CTX_BAR} ${CTX_C}${PCT}%${RESET}"
+L2="${L2}${SEP}${DIM}context${RESET} ${CTX_BAR} ${CTX_C}${PCT}%${RESET}"
 
-# Rate limit bars (5h always; weekly only when >= 80%)
+# 5h usage quota
 if [ -n "$RATE_5H" ] && [ "$RATE_5H" != "null" ]; then
   R5=$(printf "%.0f" "$RATE_5H")
   R5_C=$(quota_color "$R5")
@@ -204,6 +302,7 @@ if [ -n "$RATE_5H" ] && [ "$RATE_5H" != "null" ]; then
   L2="${L2}${VSEP}${DIM}usage${RESET} ${USAGE_PART}"
 fi
 
+# 7d usage quota
 if [ -n "$RATE_7D" ] && [ "$RATE_7D" != "null" ]; then
   R7=$(printf "%.0f" "$RATE_7D")
   R7_C=$(quota_color "$R7")
@@ -215,28 +314,33 @@ if [ -n "$RATE_7D" ] && [ "$RATE_7D" != "null" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
-# LINE 3: Cost + cache hit rate + API wait + cur token detail
+# LINE 3: tok/s + input breakdown + output + api wait
 # ══════════════════════════════════════════════════════════════
-COST_FMT=$(printf '$%.4f' "$COST")
-L3="${YELLOW}${COST_FMT}${RESET}"
-
-# Cache hit rate
-if [ "$CUR_INPUT" != "0" ] && [ "$CUR_INPUT" != "null" ]; then
-  CACHE_TOTAL=$(( CACHE_READ + CUR_INPUT + CACHE_CREATE ))
-  if [ "$CACHE_TOTAL" -gt 0 ]; then
-    CACHE_PCT=$(( CACHE_READ * 100 / CACHE_TOTAL ))
-    # Higher cache = better → invert color
-    CACHE_C=$(quota_color "$(( 100 - CACHE_PCT ))")
-    L3="${L3}${SEP}${DIM}cache${RESET} ${CACHE_C}${CACHE_PCT}%${RESET}"
-  fi
-fi
-
-# Total session tokens
+CUR_FMT=$(fmt_tok "$CUR_INPUT")
+CR_FMT=$(fmt_tok "$CACHE_READ")
+CW_FMT=$(fmt_tok "$CACHE_CREATE")
 IN_FMT=$(fmt_tok "$TOTAL_IN")
 OUT_FMT=$(fmt_tok "$TOTAL_OUT")
-L3="${L3}${SEP}${DIM}in:${RESET} ${CYAN}${IN_FMT}${RESET} ${DIM}out:${RESET} ${MAGENTA}${OUT_FMT}${RESET}"
 
-# API wait time (always shown)
+TOTAL_CUR_IN=$(( CUR_INPUT + CACHE_READ + CACHE_CREATE ))
+TOTAL_CUR_FMT=$(fmt_tok "$TOTAL_CUR_IN")
+
+# ── Estimate current turn output via delta ────────────────────
+OUT_DELTA_FILE="/tmp/.claude-out-prev-${SESSION_ID}"
+PREV_OUT=$(cat "$OUT_DELTA_FILE" 2>/dev/null || echo 0)
+CUR_OUT_DELTA=0
+if [ -n "$TOTAL_OUT" ] && [ "$TOTAL_OUT" != "null" ] && [ "$TOTAL_OUT" -ge "$PREV_OUT" ]; then
+  CUR_OUT_DELTA=$(( TOTAL_OUT - PREV_OUT ))
+  echo "$TOTAL_OUT" > "$OUT_DELTA_FILE"
+fi
+CUR_OUT_FMT=$(fmt_tok "$CUR_OUT_DELTA")
+
+L3=""
+[ -n "$TOK_PER_S" ] && L3="${CYAN}${TOK_PER_S}${RESET} ${DIM}tok/s${RESET}${SEP}"
+
+L3="${L3}${DIM}session:${RESET} ${CYAN}${IN_FMT}${RESET} ${DIM}in / ${RESET}${MAGENTA}${OUT_FMT}${RESET} ${DIM}out${RESET}"
+L3="${L3}${SEP}${DIM}this turn:${RESET} ${CYAN}${TOTAL_CUR_FMT}${RESET} ${DIM}input:${RESET} ${CUR_FMT}${DIM}(new)${RESET}+${CR_FMT}${DIM}(cached)${RESET}+${CW_FMT}${DIM}(stored)${RESET}  ${MAGENTA}${CUR_OUT_FMT}${RESET} ${DIM}output${RESET}"
+
 API_DUR=$(fmt_dur "$API_DURATION_MS")
 if [ "${DURATION_MS:-0}" -gt 0 ] && [ "${API_DURATION_MS:-0}" -gt 0 ]; then
   API_PCT=$(( API_DURATION_MS * 100 / DURATION_MS ))
@@ -245,42 +349,41 @@ else
   L3="${L3}${SEP}${DIM}api wait${RESET} ${CYAN}${API_DUR}${RESET}"
 fi
 
-# Current token detail
-CUR_FMT=$(fmt_tok "$CUR_INPUT")
-CR_FMT=$(fmt_tok "$CACHE_READ")
-CW_FMT=$(fmt_tok "$CACHE_CREATE")
-L3="${L3}${SEP}${DIM}cur${RESET} ${CUR_FMT} ${DIM}in${RESET}  ${CR_FMT} ${DIM}read${RESET}  ${CW_FMT} ${DIM}write${RESET}"
-
 # ══════════════════════════════════════════════════════════════
-# LINE 4: Auth info (cached 5 min)
+# LINE 4: Tool activity
 # ══════════════════════════════════════════════════════════════
-AUTH_CACHE="/tmp/.claude-auth-cache"
-AUTH_JSON=""
-if [ -f "$AUTH_CACHE" ] && [ $(( $(date +%s) - $(stat -f %m "$AUTH_CACHE" 2>/dev/null || echo 0) )) -lt 300 ]; then
-  AUTH_JSON=$(cat "$AUTH_CACHE")
-else
-  AUTH_JSON=$(claude auth status 2>/dev/null) && echo "$AUTH_JSON" > "$AUTH_CACHE"
-fi
-
 L4=""
-if [ -n "$ANTHROPIC_BASE_URL" ]; then
-  L4="${DIM}api key${RESET}${SEP}${CYAN}${ANTHROPIC_BASE_URL}${RESET}"
-elif [ -n "$AUTH_JSON" ]; then
-  AUTH_EMAIL=$(echo "$AUTH_JSON" | jq -r '.email // empty')
-  AUTH_METHOD=$(echo "$AUTH_JSON" | jq -r '.authMethod // empty')
-  AUTH_SUB=$(echo "$AUTH_JSON" | jq -r '.subscriptionType // empty')
-  AUTH_BASE_URL=$(echo "$AUTH_JSON" | jq -r '.baseUrl // .apiUrl // empty')
+[ -n "$TOOL_ACTIVITY" ] && L4="${DIM}tools${RESET}${SEP}${CYAN}${TOOL_ACTIVITY}${RESET}"
 
-  if [ -n "$AUTH_BASE_URL" ]; then
-    L4="${DIM}api key${RESET}${SEP}${CYAN}${AUTH_BASE_URL}${RESET}"
-  elif [ -n "$AUTH_EMAIL" ]; then
-    L4="${DIM}claude.ai${RESET}${SEP}${CYAN}${AUTH_EMAIL}${RESET}"
-    [ -n "$AUTH_SUB" ] && L4="${L4}${SEP}${GREEN}${AUTH_SUB}${RESET}"
-  fi
+# ══════════════════════════════════════════════════════════════
+# LINE 5: Agent info
+# ══════════════════════════════════════════════════════════════
+L5=""
+[ -n "$AGENT" ] && L5="${DIM}agent${RESET}${SEP}${MAGENTA}${AGENT}${RESET}"
+if [ -n "$AGENT_LAST" ]; then
+  AGENT_LAST_PART="${DIM}last${RESET}${SEP}${MAGENTA}${AGENT_LAST}${RESET}"
+  [ -n "$L5" ] && L5="${L5}${VSEP}${AGENT_LAST_PART}" || L5="$AGENT_LAST_PART"
 fi
+
+# ══════════════════════════════════════════════════════════════
+# LINE 6: Todo
+# ══════════════════════════════════════════════════════════════
+L6=""
+[ -n "$TODO_INFO" ] && L6="${DIM}todo${RESET}${SEP}${YELLOW}${TODO_INFO}${RESET}"
+
+# ══════════════════════════════════════════════════════════════
+# LINE 7 (last): Session duration + mem + config
+# ══════════════════════════════════════════════════════════════
+DUR=$(fmt_dur "$(( ELAPSED_S * 1000 ))")
+L7="${DIM}⏱ ${DUR}${RESET}"
+L7="${L7}${VSEP}${DIM}mem${RESET} ${GREEN}${MEM_USED_GB}${RESET}${DIM}/${MEM_TOTAL_GB}G${RESET}"
+L7="${L7}${VSEP}${DIM}CLAUDE.md${RESET}×${CLAUDE_MD_COUNT} ${DIM}hooks${RESET}×${HOOKS_COUNT} ${DIM}mcps${RESET}×${MCP_COUNT}"
 
 # ── Output ────────────────────────────────────────────────────
 echo -e "$L1"
 echo -e "$L2"
 echo -e "$L3"
 [ -n "$L4" ] && echo -e "$L4"
+[ -n "$L5" ] && echo -e "$L5"
+[ -n "$L6" ] && echo -e "$L6"
+echo -e "$L7"
