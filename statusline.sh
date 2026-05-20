@@ -254,7 +254,6 @@ else
 fi
 
 L4=""
-# API key mode: prefer ANTHROPIC_BASE_URL env var (most reliable)
 if [ -n "$ANTHROPIC_BASE_URL" ]; then
   L4="${DIM}api key${RESET}${SEP}${CYAN}${ANTHROPIC_BASE_URL}${RESET}"
 elif [ -n "$AUTH_JSON" ]; then
@@ -263,12 +262,11 @@ elif [ -n "$AUTH_JSON" ]; then
   AUTH_SUB=$(echo "$AUTH_JSON" | jq -r '.subscriptionType // empty')
   AUTH_BASE_URL=$(echo "$AUTH_JSON" | jq -r '.baseUrl // .apiUrl // empty')
 
-  if [ -n "$AUTH_BASE_URL" ] && [ "$AUTH_BASE_URL" != "https://api.anthropic.com" ]; then
+  if [ -n "$AUTH_BASE_URL" ]; then
     L4="${DIM}api key${RESET}${SEP}${CYAN}${AUTH_BASE_URL}${RESET}"
   elif [ -n "$AUTH_EMAIL" ]; then
-    L4="${CYAN}${AUTH_EMAIL}${RESET}"
+    L4="${DIM}claude.ai${RESET}${SEP}${CYAN}${AUTH_EMAIL}${RESET}"
     [ -n "$AUTH_SUB" ] && L4="${L4}${SEP}${GREEN}${AUTH_SUB}${RESET}"
-    [ -n "$AUTH_METHOD" ] && L4="${L4}${SEP}${DIM}${AUTH_METHOD}${RESET}"
   fi
 fi
 
