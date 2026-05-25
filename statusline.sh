@@ -25,6 +25,8 @@ RATE_5H=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty
 RATE_7D=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
 RESET_5H=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
 RESET_7D=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+EFFORT=$(echo "$input" | jq -r '.effort.level // empty')
+THINKING=$(echo "$input" | jq -r '.thinking.enabled // empty')
 TRANSCRIPT_PATH=$(echo "$input" | jq -r '.transcript_path // empty')
 SESSION_ID_JSON=$(echo "$input" | jq -r '.session_id // empty')
 
@@ -239,10 +241,22 @@ elif [ -n "$AUTH_EMAIL" ]; then
   [ -n "$AUTH_SUB" ] && L1="${L1}${SEP}${GREEN}${AUTH_SUB}${RESET}"
 fi
 
-# Model + context size + version
+# Model + context size + version + effort
 MODEL_PART="${CYAN}${BOLD}${MODEL}${RESET}"
 [ -n "$CTX_LABEL" ] && MODEL_PART="${MODEL_PART} ${CTX_LABEL}"
 [ -n "$VERSION" ]   && MODEL_PART="${MODEL_PART} ${DIM}v${VERSION}${RESET}"
+if [ -n "$EFFORT" ] && [ "$EFFORT" != "null" ]; then
+  case "$EFFORT" in
+    low)   EFFORT_COLOR="$DIM" ;;
+    medium) EFFORT_COLOR="$GREEN" ;;
+    high)  EFFORT_COLOR="$YELLOW" ;;
+    xhigh) EFFORT_COLOR="$ORANGE" ;;
+    max)   EFFORT_COLOR="$RED" ;;
+    *)     EFFORT_COLOR="$CYAN" ;;
+  esac
+  MODEL_PART="${MODEL_PART}${SEP}${DIM}effort${RESET} ${EFFORT_COLOR}${BOLD}${EFFORT}${RESET}"
+  [ "$THINKING" = "true" ] && MODEL_PART="${MODEL_PART} ${DIM}🧠 thinking${RESET}"
+fi
 [ -n "$L1" ] && L1="${L1}${SEP}${MODEL_PART}" || L1="$MODEL_PART"
 
 # Dir + Git
